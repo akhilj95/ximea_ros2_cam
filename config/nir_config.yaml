@@ -1,0 +1,32 @@
+/ximea_nir/ximea_nir_node:
+  ros__parameters:
+    # -------- Image Format Configuration --------
+    image_format: "XI_MONO8"
+
+    # -------- Timing & Control Configuration --------
+    img_capture_timeout_ms: 1000
+
+    # -------- Triggering Config (0-Free Run, 2-Hardware) --------
+    trigger_mode: 0
+    hw_trigger_edge: 0
+
+    # -------- Framerate Settings --------
+    framerate_control: true
+    framerate_set: 30
+
+    # -------- Exposure Settings --------
+    auto_exposure: false
+    exposure_time_us: 3000
+    manual_gain_db: 9.0
+    auto_exposure_priority: 0.8
+    auto_exposure_time_limit_us: 30000
+    auto_gain_limit_db: 2.0
+
+    # -------- White Balance (Optional for Mono, Inactive) --------
+    wb_mode: 0
+
+    # -------- Region of Interest Bounds (0/0/0/0 for Full Sensor) --------
+    roi_left: 0
+    roi_top: 0
+    roi_width: 0
+    roi_height: 0
