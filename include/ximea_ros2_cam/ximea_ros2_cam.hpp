@@ -51,6 +51,7 @@ private:
   
   std::atomic<bool> is_active_{false};
   std::atomic<uint64_t> frame_count_{0};
+  std::atomic<bool> reconnect_pending_{false};
 
   // Hardware time anchoring state
   bool hw_anchor_set_{false};
@@ -63,6 +64,8 @@ private:
   double poll_open_period_s_{2.0};
   double poll_frame_period_s_{0.001};
   bool use_hardware_timestamps_{false};
+
+  int fail_count_{0};
 
   bool publish_xi_image_info_{false};
 
@@ -83,6 +86,7 @@ private:
   int    roi_left_{0}, roi_top_{0}, roi_width_{0}, roi_height_{0};
   int    num_cams_in_bus_{1};
   double bw_safety_ratio_{0.9};
+  int transport_buffer_commit_{32};
   std::string camera_info_url_;
 };
 

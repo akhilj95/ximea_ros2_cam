@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <utility> // FIX: Brings in std::move
+#include <utility>
 
 #include <rclcpp_components/register_node_macro.hpp>
 
@@ -87,18 +87,19 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   wb_kg_   = this->declare_parameter("wb_kg", 1.0);
   wb_kb_   = this->declare_parameter("wb_kb", 1.0);
 
-  // ROI (0 width/height means "use full sensor")
+  // ROI
   roi_left_   = this->declare_parameter("roi_left", 0);
   roi_top_    = this->declare_parameter("roi_top", 0);
   roi_width_  = this->declare_parameter("roi_width", 0);
   roi_height_ = this->declare_parameter("roi_height", 0);
 
-  // bandwidth
-  num_cams_in_bus_ = this->declare_parameter("num_cams_in_bus", 1);
-  bw_safety_ratio_ = this->declare_parameter("bw_safety_ratio", 0.9);
+  // bandwidth / optimization
+  num_cams_in_bus_         = this->declare_parameter("num_cams_in_bus", 1);
+  bw_safety_ratio_         = this->declare_parameter("bw_safety_ratio", 0.9);
+  transport_buffer_commit_ = this->declare_parameter("transport_buffer_commit", 32);
+
   if (bw_safety_ratio_ <= 0.0 || bw_safety_ratio_ > 1.0) {
-    RCLCPP_WARN(get_logger(),
-      "bw_safety_ratio=%.3f out of (0,1]; clamping to 0.9", bw_safety_ratio_);
+    RCLCPP_WARN(get_logger(), "bw_safety_ratio=%.3f out of bounds; clamping to 0.9", bw_safety_ratio_);
     bw_safety_ratio_ = 0.9;
   }
 
@@ -127,14 +128,8 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
 
   cam_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(this, camera_name_);
 
-  if (!camera_info_url_.empty() &&
-      cam_info_manager_->validateURL(camera_info_url_) &&
-      cam_info_manager_->loadCameraInfo(camera_info_url_)) {
-    RCLCPP_INFO(get_logger(), "Loaded camera info from %s", camera_info_url_.c_str());
-  }
-
-  xiSetParamFloat(xi_handle_, XI_PRM_AE_MAX_LIMIT,
-                static_cast<float>(auto_exposure_time_limit_us_));
+  // Global prerequisite: Enable bandwidth calculations for accurate querying later
+  xiSetParamInt(0, XI_PRM_AUTO_BANDWIDTH_CALCULATION, XI_ON);
 
   open_device_timer_ = this->create_wall_timer(
     std::chrono::duration<double>(poll_open_period_s_),
@@ -149,6 +144,7 @@ XimeaRosCam::~XimeaRosCam() {
 
 void XimeaRosCam::shutdown() {
   is_active_ = false;
+  hw_anchor_set_ = false;
 
   if (open_device_timer_) {
     open_device_timer_->cancel();
@@ -197,17 +193,24 @@ void XimeaRosCam::openDeviceCallback() {
       return;
     }
     is_active_ = true;
+    fail_count_ = 0;
+
+    if (frame_capture_timer_) {
+      frame_capture_timer_->cancel();
+    }
 
     frame_capture_timer_ = this->create_wall_timer(
       std::chrono::duration<double>(poll_frame_period_s_),
       std::bind(&XimeaRosCam::frameCaptureCallback, this));
       
     RCLCPP_INFO(this->get_logger(), "Successfully connected and started acquisition on camera SN=%s", serial_no_.c_str());
+  } else {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+      "Searching for camera %s...", serial_no_.c_str());
   }
 }
 
 namespace {
-  // Tiny status helper: logs and returns false on failure.
   bool checkXi(rclcpp::Logger logger, XI_RETURN s, const char * what) {
     if (s == XI_OK) return true;
     RCLCPP_ERROR(logger, "xiAPI: %s failed with status %d", what, s);
@@ -219,11 +222,11 @@ bool XimeaRosCam::configureCamera() {
   auto log = this->get_logger();
   XI_RETURN s;
 
-  // -------- Image format (do FIRST; some bayer/RAW modes change reported maxes) --------
+  // -------- Image format --------
   s = xiSetParamInt(xi_handle_, XI_PRM_IMAGE_DATA_FORMAT, format_int_);
   if (!checkXi(log, s, "set XI_PRM_IMAGE_DATA_FORMAT")) return false;
 
-  // -------- ROI: query sensor maxes, fall back to full sensor on 0 --------
+  // -------- ROI --------
   int sensor_max_w = 0, sensor_max_h = 0;
   xiGetParamInt(xi_handle_, XI_PRM_WIDTH  XI_PRM_INFO_MAX, &sensor_max_w);
   xiGetParamInt(xi_handle_, XI_PRM_HEIGHT XI_PRM_INFO_MAX, &sensor_max_h);
@@ -236,11 +239,22 @@ bool XimeaRosCam::configureCamera() {
                  roi_left_, roi_top_, roi_width_, roi_height_, sensor_max_w, sensor_max_h);
     return false;
   }
-  // Width/Height first, then offsets — xiAPI is picky about order.
-  xiSetParamInt(xi_handle_, XI_PRM_WIDTH,    roi_width_);
-  xiSetParamInt(xi_handle_, XI_PRM_HEIGHT,   roi_height_);
-  xiSetParamInt(xi_handle_, XI_PRM_OFFSET_X, roi_left_);
-  xiSetParamInt(xi_handle_, XI_PRM_OFFSET_Y, roi_top_);
+
+  int inc_w = 1, inc_h = 1, inc_x = 1, inc_y = 1;
+  xiGetParamInt(xi_handle_, XI_PRM_WIDTH XI_PRM_INFO_INCREMENT, &inc_w);
+  xiGetParamInt(xi_handle_, XI_PRM_HEIGHT XI_PRM_INFO_INCREMENT, &inc_h);
+  xiGetParamInt(xi_handle_, XI_PRM_OFFSET_X XI_PRM_INFO_INCREMENT, &inc_x);
+  xiGetParamInt(xi_handle_, XI_PRM_OFFSET_Y XI_PRM_INFO_INCREMENT, &inc_y);
+
+  roi_width_  = (roi_width_ / inc_w) * inc_w;
+  roi_height_ = (roi_height_ / inc_h) * inc_h;
+  roi_left_   = (roi_left_ / inc_x) * inc_x;
+  roi_top_    = (roi_top_ / inc_y) * inc_y;
+
+  if (!checkXi(log, xiSetParamInt(xi_handle_, XI_PRM_WIDTH, roi_width_), "set ROI Width")) return false;
+  if (!checkXi(log, xiSetParamInt(xi_handle_, XI_PRM_HEIGHT, roi_height_), "set ROI Height")) return false;
+  if (!checkXi(log, xiSetParamInt(xi_handle_, XI_PRM_OFFSET_X, roi_left_), "set ROI Offset X")) return false;
+  if (!checkXi(log, xiSetParamInt(xi_handle_, XI_PRM_OFFSET_Y, roi_top_), "set ROI Offset Y")) return false;
 
   // -------- Triggering --------
   switch (trigger_mode_) {
@@ -250,7 +264,7 @@ bool XimeaRosCam::configureCamera() {
       xiSetParamInt(xi_handle_, XI_PRM_GPI_SELECTOR, 1);
       xiSetParamInt(xi_handle_, XI_PRM_GPI_MODE,    XI_GPI_TRIGGER);
       break;
-    case 1:  // software (not fully wired — needs xiSetParamInt(.., XI_PRM_TRG_SOFTWARE, 1) per shot)
+    case 1:  // software
       xiSetParamInt(xi_handle_, XI_PRM_TRG_SOURCE, XI_TRG_SOFTWARE);
       break;
     default:
@@ -258,67 +272,103 @@ bool XimeaRosCam::configureCamera() {
       break;
   }
 
-  // -------- Exposure / gain (THIS is what was missing — primary cause of black images) --------
+  // -------- Exposure / gain --------
   if (auto_exposure_) {
     xiSetParamInt(xi_handle_,   XI_PRM_AEAG, 1);
-    xiSetParamFloat(xi_handle_, XI_PRM_EXP_PRIORITY,
-                    static_cast<float>(auto_exposure_priority_));
-    xiSetParamFloat(xi_handle_, XI_PRM_AE_MAX_LIMIT,
-                static_cast<float>(auto_exposure_time_limit_us_));
-    xiSetParamFloat(xi_handle_, XI_PRM_AG_MAX_LIMIT,
-                    static_cast<float>(auto_gain_limit_db_));
-    RCLCPP_INFO(log, "Auto-exposure ON (max %d us, gain max %.2f dB, priority %.2f)",
-                auto_exposure_time_limit_us_, auto_gain_limit_db_, auto_exposure_priority_);
+    auto_exposure_priority_ = std::clamp(auto_exposure_priority_, 0.5, 1.0);
+    xiSetParamFloat(xi_handle_, XI_PRM_EXP_PRIORITY, static_cast<float>(auto_exposure_priority_));
+    xiSetParamFloat(xi_handle_, XI_PRM_AE_MAX_LIMIT, static_cast<float>(auto_exposure_time_limit_us_));
+    xiSetParamFloat(xi_handle_, XI_PRM_AG_MAX_LIMIT, static_cast<float>(auto_gain_limit_db_));
+    RCLCPP_INFO(log, "Auto-exposure ON (max %d us, priority %.2f)", auto_exposure_time_limit_us_, auto_exposure_priority_);
   } else {
     xiSetParamInt(xi_handle_,   XI_PRM_AEAG, 0);
     xiSetParamInt(xi_handle_,   XI_PRM_EXPOSURE, exposure_time_us_);
     xiSetParamFloat(xi_handle_, XI_PRM_GAIN, static_cast<float>(manual_gain_db_));
-    RCLCPP_INFO(log, "Manual exposure %d us, gain %.2f dB",
-                exposure_time_us_, manual_gain_db_);
+    RCLCPP_INFO(log, "Manual exposure %d us, gain %.2f dB", exposure_time_us_, manual_gain_db_);
   }
 
-  // -------- White balance (color sensors only; harmless on mono) --------
+  // -------- White balance --------
   switch (wb_mode_) {
     case 2:
-      xiSetParamInt(xi_handle_, XI_PRM_AUTO_WB, 1);
-      RCLCPP_INFO(log, "White balance: auto");
+      if (xiSetParamInt(xi_handle_, XI_PRM_AUTO_WB, 1) != XI_OK) {
+        RCLCPP_WARN(log, "Auto White Balance rejected (likely mono camera)");
+      }
       break;
     case 1:
       xiSetParamInt(xi_handle_,   XI_PRM_AUTO_WB, 0);
       xiSetParamFloat(xi_handle_, XI_PRM_WB_KR, static_cast<float>(wb_kr_));
       xiSetParamFloat(xi_handle_, XI_PRM_WB_KG, static_cast<float>(wb_kg_));
       xiSetParamFloat(xi_handle_, XI_PRM_WB_KB, static_cast<float>(wb_kb_));
-      RCLCPP_INFO(log, "White balance manual: KR=%.3f KG=%.3f KB=%.3f", wb_kr_, wb_kg_, wb_kb_);
       break;
     default:
       xiSetParamInt(xi_handle_, XI_PRM_AUTO_WB, 0);
       break;
   }
 
-  // -------- Bandwidth limiting (important for >1 camera on the same USB controller) --------
+  // -------- Bandwidth limiting --------
   int avail_bw_mbps = 0;
-  xiGetParamInt(xi_handle_, XI_PRM_AVAILABLE_BANDWIDTH, &avail_bw_mbps);
-  if (num_cams_in_bus_ > 1) avail_bw_mbps /= num_cams_in_bus_;
-  const int limit_mbps = static_cast<int>(avail_bw_mbps * bw_safety_ratio_);
-  RCLCPP_INFO(log, "Bandwidth: available=%d Mbps, cams_in_bus=%d -> limit=%d Mbps",
-              avail_bw_mbps, num_cams_in_bus_, limit_mbps);
-  xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH,      limit_mbps);
-  xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH_MODE, XI_ON);
+  if (xiGetParamInt(xi_handle_, XI_PRM_AVAILABLE_BANDWIDTH, &avail_bw_mbps) == XI_OK) {
+    if (num_cams_in_bus_ > 1) avail_bw_mbps /= num_cams_in_bus_;
+    const int limit_mbps = static_cast<int>(avail_bw_mbps * bw_safety_ratio_);
+    xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH,      limit_mbps);
+    XI_RETURN bw_mode_s = xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH_MODE, XI_ON);
+    if (bw_mode_s != XI_OK && bw_mode_s != 100) {
+      RCLCPP_WARN(log, "XI_PRM_LIMIT_BANDWIDTH_MODE set failed: %d", bw_mode_s);
+    }
+    // Status 100 (XI_NOT_SUPPORTED) is expected on older models — limit is still applied via XI_PRM_LIMIT_BANDWIDTH alone.
+  } else {
+    RCLCPP_WARN(log, "Failed to read available bandwidth.");
+  }
 
-  // -------- Framerate (only meaningful in free-run) --------
+  // -------- Framerate --------
   if (trigger_mode_ == 0 && framerate_control_) {
     xiSetParamInt(xi_handle_, XI_PRM_ACQ_TIMING_MODE, XI_ACQ_TIMING_MODE_FRAME_RATE);
-    xiSetParamInt(xi_handle_, XI_PRM_FRAMERATE, framerate_set_);
-    RCLCPP_INFO(log, "Framerate locked to %d Hz", framerate_set_);
+    XI_RETURN fr = xiSetParamInt(xi_handle_, XI_PRM_FRAMERATE, framerate_set_);
+    if (fr != XI_OK) {
+      float fr_max = 0.f;
+      xiGetParamFloat(xi_handle_, XI_PRM_FRAMERATE XI_PRM_INFO_MAX, &fr_max);
+      RCLCPP_WARN(log,
+        "Framerate %d Hz rejected (status %d, max achievable %.1f Hz at current settings). "
+        "Falling back to free-run.",
+        framerate_set_, fr, fr_max);
+      xiSetParamInt(xi_handle_, XI_PRM_ACQ_TIMING_MODE, XI_ACQ_TIMING_MODE_FREE_RUN);
+    }
   } else if (trigger_mode_ == 0) {
     xiSetParamInt(xi_handle_, XI_PRM_ACQ_TIMING_MODE, XI_ACQ_TIMING_MODE_FREE_RUN);
   }
 
-  // -------- Buffer tuning for high framerates --------
+  // -------- Performance & Buffer Tuning --------
   int qsize_max = 0;
-  xiGetParamInt(xi_handle_, XI_PRM_BUFFERS_QUEUE_SIZE XI_PRM_INFO_MAX, &qsize_max);
-  if (qsize_max > 0) {
+  if (xiGetParamInt(xi_handle_, XI_PRM_BUFFERS_QUEUE_SIZE XI_PRM_INFO_MAX, &qsize_max) == XI_OK && qsize_max > 0) {
     xiSetParamInt(xi_handle_, XI_PRM_BUFFERS_QUEUE_SIZE, qsize_max);
+  }
+
+  // Optimize transport buffer commit (for high framerates)
+  s = xiSetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_COMMIT, transport_buffer_commit_);
+  if (s != XI_OK) {
+    RCLCPP_WARN(log, "Could not set transport buffer commit to %d (status %d)", transport_buffer_commit_, s);
+  }
+
+  // Optimize transport buffer size for small payloads (latency reduction)
+  int payload = 0;
+  int tb_default = 0, tb_inc = 0, tb_min = 0;
+  if (xiGetParamInt(xi_handle_, XI_PRM_IMAGE_PAYLOAD_SIZE, &payload) == XI_OK &&
+      xiGetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_SIZE, &tb_default) == XI_OK &&
+      xiGetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_SIZE XI_PRM_INFO_INCREMENT, &tb_inc) == XI_OK &&
+      xiGetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_SIZE XI_PRM_INFO_MIN, &tb_min) == XI_OK) 
+  {
+    if (payload < tb_default + tb_inc) {
+      int tb_new = payload;
+      if (tb_inc > 0) {
+        int remainder = tb_new % tb_inc;
+        if (remainder) tb_new += tb_inc - remainder;
+      }
+      if (tb_new < tb_min) tb_new = tb_min;
+      
+      if (xiSetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_SIZE, tb_new) == XI_OK) {
+        RCLCPP_INFO(log, "Tuned transport buffer size to match payload: %d bytes", tb_new);
+      }
+    }
   }
 
   return true;
@@ -346,34 +396,58 @@ void XimeaRosCam::frameCaptureCallback() {
   {
     std::lock_guard<std::mutex> lock(camera_mutex_);
     if (!xi_handle_ || xiGetImage(xi_handle_, img_capture_timeout_ms_, &xi_img) != XI_OK) {
+      if (++fail_count_ > 10) {
+        RCLCPP_ERROR(this->get_logger(), "Lost connection to camera. Attempting reconnect...");
+        is_active_ = false;
+        hw_anchor_set_ = false;
+        if (xi_handle_) {
+          xiStopAcquisition(xi_handle_);
+          xiCloseDevice(xi_handle_);
+          xi_handle_ = nullptr;
+        }
+        fail_count_ = 0;
+        reconnect_pending_ = true;
+      }
       return;
     }
+    fail_count_ = 0;
+  }
+
+  // Safe reconnect delegation (outside lock, avoids destroying self timer synchronously)
+  if (reconnect_pending_.exchange(false)) {
+    if (frame_capture_timer_) {
+      frame_capture_timer_->cancel();
+    }
+    open_device_timer_ = this->create_wall_timer(
+      std::chrono::duration<double>(poll_open_period_s_),
+      std::bind(&XimeaRosCam::openDeviceCallback, this));
+    return;
   }
 
   rclcpp::Time stamp = use_hardware_timestamps_ ? 
     hardwareToRosTime(xi_img.tsSec, xi_img.tsUSec) : this->now();
 
-  sensor_msgs::msg::Image img_msg;
-  img_msg.header.stamp    = stamp;
-  img_msg.header.frame_id = frame_id_;
-  img_msg.height          = xi_img.height;
-  img_msg.width           = xi_img.width;
-  img_msg.encoding        = encoding_;
-  img_msg.step            = xi_img.width * bytes_per_pixel_;
+  auto img_msg = std::make_unique<sensor_msgs::msg::Image>();
+  img_msg->header.stamp    = stamp;
+  img_msg->header.frame_id = frame_id_;
+  img_msg->height          = xi_img.height;
+  img_msg->width           = xi_img.width;
+  img_msg->encoding        = encoding_;
+  img_msg->step            = xi_img.width * bytes_per_pixel_;
   
-  size_t payload_bytes    = img_msg.step * xi_img.height;
-  img_msg.data.resize(payload_bytes);
-  std::memcpy(img_msg.data.data(), xi_img.bp, payload_bytes);
+  size_t payload_bytes     = img_msg->step * xi_img.height;
+  img_msg->data.resize(payload_bytes);
+  std::memcpy(img_msg->data.data(), xi_img.bp, payload_bytes);
 
-  sensor_msgs::msg::CameraInfo info_msg = cam_info_manager_->getCameraInfo();
-  info_msg.header.stamp    = stamp;
-  info_msg.header.frame_id = frame_id_;
-  if (info_msg.width == 0) {
-    info_msg.width  = xi_img.width;
-    info_msg.height = xi_img.height;
+  auto info_msg = std::make_unique<sensor_msgs::msg::CameraInfo>(cam_info_manager_->getCameraInfo());
+  info_msg->header.stamp    = stamp;
+  info_msg->header.frame_id = frame_id_;
+  if (info_msg->width == 0) {
+    info_msg->width  = xi_img.width;
+    info_msg->height = xi_img.height;
   }
 
-  image_pub_.publish(img_msg, info_msg);
+  image_pub_.publish(std::move(*img_msg), std::move(*info_msg));
 
   std_msgs::msg::UInt32 count_msg;
   count_msg.data = ++frame_count_;
@@ -407,5 +481,4 @@ void XimeaRosCam::frameCaptureCallback() {
 
 } // namespace ximea_ros2_cam
 
-// EXPORT MACRO: Must always be declared outside of all namespace scopes!
 RCLCPP_COMPONENTS_REGISTER_NODE(ximea_ros2_cam::XimeaRosCam)
