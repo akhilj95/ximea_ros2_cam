@@ -65,6 +65,25 @@ private:
   bool use_hardware_timestamps_{false};
 
   bool publish_xi_image_info_{false};
+
+  // --------- Camera configuration (loaded from parameters) ---------
+  int    img_capture_timeout_ms_{1000};
+  int    trigger_mode_{0};
+  int    hw_trigger_edge_{0};
+  bool   framerate_control_{false};
+  int    framerate_set_{30};
+  bool   auto_exposure_{true};
+  int    exposure_time_us_{3000};
+  double manual_gain_db_{0.0};
+  int    auto_exposure_time_limit_us_{30000};
+  double auto_exposure_priority_{0.8};
+  double auto_gain_limit_db_{2.0};
+  int    wb_mode_{0};
+  double wb_kr_{1.0}, wb_kg_{1.0}, wb_kb_{1.0};
+  int    roi_left_{0}, roi_top_{0}, roi_width_{0}, roi_height_{0};
+  int    num_cams_in_bus_{1};
+  double bw_safety_ratio_{0.9};
+  std::string camera_info_url_;
 };
 
 } // namespace ximea_ros2_cam

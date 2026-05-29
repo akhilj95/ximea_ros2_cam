@@ -51,13 +51,59 @@ const std::map<std::string, int> & XimeaRosCam::bytesPerPixelMap() {
 XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
 : Node("ximea_cam_node", options) 
 {
-  serial_no_               = this->declare_parameter("serial_no", "");
-  camera_name_             = this->declare_parameter("camera_name", "ximea_camera");
-  frame_id_                = this->declare_parameter("frame_id", "camera_optical_frame");
-  format_                  = this->declare_parameter("image_format", "XI_MONO8");
+  // identity / topics
+  serial_no_       = this->declare_parameter("serial_no", "");
+  camera_name_     = this->declare_parameter("camera_name", "ximea_camera");
+  frame_id_        = this->declare_parameter("frame_id", "camera_optical_frame");
+  camera_info_url_ = this->declare_parameter("camera_info_url", "");
+
+  // image format
+  format_ = this->declare_parameter("image_format", "XI_MONO8");
+
+  // timing
   poll_open_period_s_      = this->declare_parameter("poll_open_period_s", 2.0);
   poll_frame_period_s_     = this->declare_parameter("poll_frame_period_s", 0.001);
-  use_hardware_timestamps_ = this->declare_parameter("use_hardware_timestamps", true);
+  img_capture_timeout_ms_  = this->declare_parameter("img_capture_timeout_ms", 1000);
+
+  // triggering
+  trigger_mode_     = this->declare_parameter("trigger_mode", 0);
+  hw_trigger_edge_  = this->declare_parameter("hw_trigger_edge", 0);
+
+  // framerate
+  framerate_control_ = this->declare_parameter("framerate_control", false);
+  framerate_set_     = this->declare_parameter("framerate_set", 30);
+
+  // exposure / gain
+  auto_exposure_                = this->declare_parameter("auto_exposure", true);
+  exposure_time_us_             = this->declare_parameter("exposure_time_us", 3000);
+  manual_gain_db_               = this->declare_parameter("manual_gain_db", 0.0);
+  auto_exposure_priority_       = this->declare_parameter("auto_exposure_priority", 0.8);
+  auto_exposure_time_limit_us_  = this->declare_parameter("auto_exposure_time_limit_us", 30000);
+  auto_gain_limit_db_           = this->declare_parameter("auto_gain_limit_db", 2.0);
+
+  // white balance
+  wb_mode_ = this->declare_parameter("wb_mode", 0);
+  wb_kr_   = this->declare_parameter("wb_kr", 1.0);
+  wb_kg_   = this->declare_parameter("wb_kg", 1.0);
+  wb_kb_   = this->declare_parameter("wb_kb", 1.0);
+
+  // ROI (0 width/height means "use full sensor")
+  roi_left_   = this->declare_parameter("roi_left", 0);
+  roi_top_    = this->declare_parameter("roi_top", 0);
+  roi_width_  = this->declare_parameter("roi_width", 0);
+  roi_height_ = this->declare_parameter("roi_height", 0);
+
+  // bandwidth
+  num_cams_in_bus_ = this->declare_parameter("num_cams_in_bus", 1);
+  bw_safety_ratio_ = this->declare_parameter("bw_safety_ratio", 0.9);
+  if (bw_safety_ratio_ <= 0.0 || bw_safety_ratio_ > 1.0) {
+    RCLCPP_WARN(get_logger(),
+      "bw_safety_ratio=%.3f out of (0,1]; clamping to 0.9", bw_safety_ratio_);
+    bw_safety_ratio_ = 0.9;
+  }
+
+  // toggles
+  use_hardware_timestamps_ = this->declare_parameter("use_hardware_timestamps", false);
   publish_xi_image_info_   = this->declare_parameter("publish_xi_image_info", false);
 
   auto & fmt_map = imageFormatMap();
@@ -80,6 +126,15 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   xi_image_info_pub_ = this->create_publisher<ximea_ros2_cam::msg::XiImageInfo>("xi_image_info", 10);
 
   cam_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(this, camera_name_);
+
+  if (!camera_info_url_.empty() &&
+      cam_info_manager_->validateURL(camera_info_url_) &&
+      cam_info_manager_->loadCameraInfo(camera_info_url_)) {
+    RCLCPP_INFO(get_logger(), "Loaded camera info from %s", camera_info_url_.c_str());
+  }
+
+  xiSetParamFloat(xi_handle_, XI_PRM_AE_MAX_LIMIT,
+                static_cast<float>(auto_exposure_time_limit_us_));
 
   open_device_timer_ = this->create_wall_timer(
     std::chrono::duration<double>(poll_open_period_s_),
@@ -134,7 +189,13 @@ void XimeaRosCam::openDeviceCallback() {
       return;
     }
 
-    xiStartAcquisition(xi_handle_);
+    XI_RETURN as = xiStartAcquisition(xi_handle_);
+    if (as != XI_OK) {
+      RCLCPP_ERROR(get_logger(), "xiStartAcquisition failed with status %d", as);
+      xiCloseDevice(xi_handle_);
+      xi_handle_ = nullptr;
+      return;
+    }
     is_active_ = true;
 
     frame_capture_timer_ = this->create_wall_timer(
@@ -145,9 +206,121 @@ void XimeaRosCam::openDeviceCallback() {
   }
 }
 
+namespace {
+  // Tiny status helper: logs and returns false on failure.
+  bool checkXi(rclcpp::Logger logger, XI_RETURN s, const char * what) {
+    if (s == XI_OK) return true;
+    RCLCPP_ERROR(logger, "xiAPI: %s failed with status %d", what, s);
+    return false;
+  }
+}  // namespace
+
 bool XimeaRosCam::configureCamera() {
-  if (xiSetParamInt(xi_handle_, XI_PRM_IMAGE_DATA_FORMAT, format_int_) != XI_OK) return false;
-  xiSetParamInt(xi_handle_, XI_PRM_AUTO_BANDWIDTH_CALCULATION, XI_ON);
+  auto log = this->get_logger();
+  XI_RETURN s;
+
+  // -------- Image format (do FIRST; some bayer/RAW modes change reported maxes) --------
+  s = xiSetParamInt(xi_handle_, XI_PRM_IMAGE_DATA_FORMAT, format_int_);
+  if (!checkXi(log, s, "set XI_PRM_IMAGE_DATA_FORMAT")) return false;
+
+  // -------- ROI: query sensor maxes, fall back to full sensor on 0 --------
+  int sensor_max_w = 0, sensor_max_h = 0;
+  xiGetParamInt(xi_handle_, XI_PRM_WIDTH  XI_PRM_INFO_MAX, &sensor_max_w);
+  xiGetParamInt(xi_handle_, XI_PRM_HEIGHT XI_PRM_INFO_MAX, &sensor_max_h);
+  if (roi_width_  <= 0) roi_width_  = sensor_max_w;
+  if (roi_height_ <= 0) roi_height_ = sensor_max_h;
+  if (roi_left_ < 0 || roi_top_ < 0 ||
+      roi_left_ + roi_width_  > sensor_max_w ||
+      roi_top_  + roi_height_ > sensor_max_h) {
+    RCLCPP_ERROR(log, "ROI out of bounds: left=%d top=%d w=%d h=%d sensor=%dx%d",
+                 roi_left_, roi_top_, roi_width_, roi_height_, sensor_max_w, sensor_max_h);
+    return false;
+  }
+  // Width/Height first, then offsets — xiAPI is picky about order.
+  xiSetParamInt(xi_handle_, XI_PRM_WIDTH,    roi_width_);
+  xiSetParamInt(xi_handle_, XI_PRM_HEIGHT,   roi_height_);
+  xiSetParamInt(xi_handle_, XI_PRM_OFFSET_X, roi_left_);
+  xiSetParamInt(xi_handle_, XI_PRM_OFFSET_Y, roi_top_);
+
+  // -------- Triggering --------
+  switch (trigger_mode_) {
+    case 2:  // hardware
+      xiSetParamInt(xi_handle_, XI_PRM_TRG_SOURCE,
+        (hw_trigger_edge_ == 1) ? XI_TRG_EDGE_FALLING : XI_TRG_EDGE_RISING);
+      xiSetParamInt(xi_handle_, XI_PRM_GPI_SELECTOR, 1);
+      xiSetParamInt(xi_handle_, XI_PRM_GPI_MODE,    XI_GPI_TRIGGER);
+      break;
+    case 1:  // software (not fully wired — needs xiSetParamInt(.., XI_PRM_TRG_SOFTWARE, 1) per shot)
+      xiSetParamInt(xi_handle_, XI_PRM_TRG_SOURCE, XI_TRG_SOFTWARE);
+      break;
+    default:
+      xiSetParamInt(xi_handle_, XI_PRM_TRG_SOURCE, XI_TRG_OFF);
+      break;
+  }
+
+  // -------- Exposure / gain (THIS is what was missing — primary cause of black images) --------
+  if (auto_exposure_) {
+    xiSetParamInt(xi_handle_,   XI_PRM_AEAG, 1);
+    xiSetParamFloat(xi_handle_, XI_PRM_EXP_PRIORITY,
+                    static_cast<float>(auto_exposure_priority_));
+    xiSetParamFloat(xi_handle_, XI_PRM_AE_MAX_LIMIT,
+                static_cast<float>(auto_exposure_time_limit_us_));
+    xiSetParamFloat(xi_handle_, XI_PRM_AG_MAX_LIMIT,
+                    static_cast<float>(auto_gain_limit_db_));
+    RCLCPP_INFO(log, "Auto-exposure ON (max %d us, gain max %.2f dB, priority %.2f)",
+                auto_exposure_time_limit_us_, auto_gain_limit_db_, auto_exposure_priority_);
+  } else {
+    xiSetParamInt(xi_handle_,   XI_PRM_AEAG, 0);
+    xiSetParamInt(xi_handle_,   XI_PRM_EXPOSURE, exposure_time_us_);
+    xiSetParamFloat(xi_handle_, XI_PRM_GAIN, static_cast<float>(manual_gain_db_));
+    RCLCPP_INFO(log, "Manual exposure %d us, gain %.2f dB",
+                exposure_time_us_, manual_gain_db_);
+  }
+
+  // -------- White balance (color sensors only; harmless on mono) --------
+  switch (wb_mode_) {
+    case 2:
+      xiSetParamInt(xi_handle_, XI_PRM_AUTO_WB, 1);
+      RCLCPP_INFO(log, "White balance: auto");
+      break;
+    case 1:
+      xiSetParamInt(xi_handle_,   XI_PRM_AUTO_WB, 0);
+      xiSetParamFloat(xi_handle_, XI_PRM_WB_KR, static_cast<float>(wb_kr_));
+      xiSetParamFloat(xi_handle_, XI_PRM_WB_KG, static_cast<float>(wb_kg_));
+      xiSetParamFloat(xi_handle_, XI_PRM_WB_KB, static_cast<float>(wb_kb_));
+      RCLCPP_INFO(log, "White balance manual: KR=%.3f KG=%.3f KB=%.3f", wb_kr_, wb_kg_, wb_kb_);
+      break;
+    default:
+      xiSetParamInt(xi_handle_, XI_PRM_AUTO_WB, 0);
+      break;
+  }
+
+  // -------- Bandwidth limiting (important for >1 camera on the same USB controller) --------
+  int avail_bw_mbps = 0;
+  xiGetParamInt(xi_handle_, XI_PRM_AVAILABLE_BANDWIDTH, &avail_bw_mbps);
+  if (num_cams_in_bus_ > 1) avail_bw_mbps /= num_cams_in_bus_;
+  const int limit_mbps = static_cast<int>(avail_bw_mbps * bw_safety_ratio_);
+  RCLCPP_INFO(log, "Bandwidth: available=%d Mbps, cams_in_bus=%d -> limit=%d Mbps",
+              avail_bw_mbps, num_cams_in_bus_, limit_mbps);
+  xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH,      limit_mbps);
+  xiSetParamInt(xi_handle_, XI_PRM_LIMIT_BANDWIDTH_MODE, XI_ON);
+
+  // -------- Framerate (only meaningful in free-run) --------
+  if (trigger_mode_ == 0 && framerate_control_) {
+    xiSetParamInt(xi_handle_, XI_PRM_ACQ_TIMING_MODE, XI_ACQ_TIMING_MODE_FRAME_RATE);
+    xiSetParamInt(xi_handle_, XI_PRM_FRAMERATE, framerate_set_);
+    RCLCPP_INFO(log, "Framerate locked to %d Hz", framerate_set_);
+  } else if (trigger_mode_ == 0) {
+    xiSetParamInt(xi_handle_, XI_PRM_ACQ_TIMING_MODE, XI_ACQ_TIMING_MODE_FREE_RUN);
+  }
+
+  // -------- Buffer tuning for high framerates --------
+  int qsize_max = 0;
+  xiGetParamInt(xi_handle_, XI_PRM_BUFFERS_QUEUE_SIZE XI_PRM_INFO_MAX, &qsize_max);
+  if (qsize_max > 0) {
+    xiSetParamInt(xi_handle_, XI_PRM_BUFFERS_QUEUE_SIZE, qsize_max);
+  }
+
   return true;
 }
 
@@ -172,7 +345,7 @@ void XimeaRosCam::frameCaptureCallback() {
 
   {
     std::lock_guard<std::mutex> lock(camera_mutex_);
-    if (!xi_handle_ || xiGetImage(xi_handle_, 1000, &xi_img) != XI_OK) {
+    if (!xi_handle_ || xiGetImage(xi_handle_, img_capture_timeout_ms_, &xi_img) != XI_OK) {
       return;
     }
   }
