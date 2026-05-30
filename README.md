@@ -89,12 +89,15 @@ ros2 run ximea_ros2_cam ximea_ros2_cam_node --ros-args \
 
 ## Published Topics
 
-Under the node's namespace:
+All topics are published under the node's namespace.
 
-- `~/image_raw` (`sensor_msgs/Image`) — auto-advertises compressed formats.
-- `~/camera_info` (`sensor_msgs/CameraInfo`)
-- `~/image_count` (`std_msgs/UInt32`)
-- `~/xi_image_info` (`ximea_ros2_cam/XiImageInfo`) — optional metadata.
+| Topic                  | Type                              | Description |
+|------------------------|-----------------------------------|-------------|
+| `image_raw`            | `sensor_msgs/msg/Image`           | Raw image stream, sensor_data QoS. Compressed variants (`image_raw/compressed`, etc.) are auto-advertised by `image_transport`. |
+| `camera_info`          | `sensor_msgs/msg/CameraInfo`      | Published alongside each image via `CameraPublisher`. Calibration content from `camera_info_url` if provided. |
+| `image_count`          | `std_msgs/msg/UInt32`             | Monotonic frame counter (driver-side). |
+| `xi_image_info`        | `ximea_ros2_cam/msg/XiImageInfo`  | Per-frame xiAPI metadata. Only published when `publish_xi_image_info: true`. |
+
 
 ## Core Parameters
 
@@ -108,14 +111,24 @@ Under the node's namespace:
   - `transport_buffer_commit` — in-flight USB requests (default `32`).
 - **Metadata**: `use_hardware_timestamps`, `publish_xi_image_info`
 
+For additional details check [`docs/parameters.md`](https://github.com/akhilj95/ximea_ros2_cam/tree/main/docs/parameters.md)
+
+
 ## Performance Tuning
 
-Crucial for high FPS or high resolution streams.
-
-1. **Increase USB memory limit:**
-
-
-2. **Enable real-time priority** — prevents thread-scheduler warnings. Add `<user> - rtprio 99` to `/etc/security/limits.conf`.
+- If your machine has multiple USB controllers, put one camera on each — that doubles the usable bandwidth versus sharing a single controller. `lsusb -t` shows the controller topology.
+- Place the following in `/etc/security/limits.conf` to make the Ximea camera driver have real time priority
+  ```
+  *               -       rtprio          0
+  @realtime       -       rtprio          81
+  *               -       nice            0
+  @realtime       -       nice            -16
+  ```
+  Then add the current user to the group `realtime`:
+  ```
+  sudo groupadd realtime
+  sudo gpasswd -a $USER realtime
+  ```
 
 
 ## Troubleshooting
