@@ -9,7 +9,7 @@ Built as a `rclcpp_components` node, it combines features from the [`wavelab/xim
 
 - Full xiAPI Control: Configure format, ROI, triggers, exposure, white balance, and framerate.
 - Multi-Camera Ready: Opens via serial number; automatically divides USB bandwidth across cameras on the same bus.
-- **Hardware-timestamp anchoring**: optional `use_hardware_timestamps` mode anchors the camera's hardware clock to ROS time on the first frame and propagates accurate per-frame capture times for downstream sensor fusion.
+- **Hardware-timestamp anchoring** *(opt-in via `use_hardware_timestamps`)*: stamps reflect the moment of exposure start, anchored to ROS time on the first frame. Gives accurate sensor-to-message latency for downstream fusion. Note that this makes `ros2 topic delay` report negative values by design — see [Timestamps](#timestamps).
 - Auto-Reconnect: Automatically recovers if the USB connection drops.
 - Publishes through `image_transport::CameraPublisher` so compressed transports (`compressed`, `theora`, etc.) work transparently.
 
@@ -130,12 +130,19 @@ For additional details check [`docs/parameters.md`](https://github.com/akhilj95/
   sudo gpasswd -a $USER realtime
   ```
 
+## Timestamps
+
+By default `use_hardware_timestamps: false` and image headers carry `node->now()` at message-construction time — clean to interpret, but the stamp lags the actual capture by exposure time + USB transfer + processing.
+
+With `use_hardware_timestamps: true`, the camera's own clock is anchored to ROS time on the first frame and every subsequent stamp reflects **exposure start**. This is what you want for multi-sensor fusion: downstream nodes see when photons actually hit the sensor, not when ROS happened to deliver the message.
+
+A side effect: `ros2 topic delay` will report **negative values** (typically tens of milliseconds). That is correct — the stamped moment really is in the past by the time the message arrives. The magnitude is your true sensor-to-message latency. A stable negative delay with low standard deviation means the anchor is working; drift over long runs would indicate camera/host clock skew.
 
 ## Troubleshooting
 
 - **`ERROR: 11` (xiSetParam framerate)** — `XI_OUT_OF_RANGE`. Your requested framerate exceeds the bandwidth/exposure budget. Lower the framerate, reduce ROI, or switch to `XI_RAW8`.
 - **`ERROR: 100` (limit_bandwidth_mode)** — harmless. Some models (e.g. MQ013) don't support the mode toggle, but the bandwidth limit itself still applies.
-- **Negative topic delay** — expected when `use_hardware_timestamps: true`. The stamp represents true exposure time (in the past); ROS receives the message later.
+- **Negative `ros2 topic delay`** — expected with `use_hardware_timestamps: true`. See [Timestamps](#timestamps).
 - **"Unable to open camera calibration file"** — normal if uncalibrated. Run the standard ROS 2 camera calibrator to generate the file.
 - **"Device already opened" on startup** — normal during multi-camera polling. Resolves itself once the other node claims its specific camera.
 
