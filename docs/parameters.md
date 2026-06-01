@@ -78,7 +78,8 @@ Values are snapped down to the nearest valid increment for the sensor.
 
 ### Timestamps and metadata
 
-| Parameter                 | Type | Default | Description |
-|---------------------------|------|---------|-------------|
-| `use_hardware_timestamps` | bool | `false` | Use hardware timestamps (anchored to ROS time on first frame). Otherwise stamps with `node->now()` at receive time. |
-| `publish_xi_image_info`   | bool | `false` | Publish the `XiImageInfo` topic with per-frame xiAPI metadata. |
+| Parameter                   | Type   | Default | Description |
+|-----------------------------|--------|---------|-------------|
+| `use_hardware_timestamps`   | bool   | `false` | Use hardware timestamps (anchored to ROS time on first frame). Otherwise stamps with `node->now()` at receive time. |
+| `hw_anchor_resync_period_s` | double | `60.0`  | Re-anchor period when `use_hardware_timestamps: true`. Bounds clock-drift accumulation; `0.0` disables. Only takes effect when hardware timestamps are enabled. |
+| `publish_xi_image_info`     | bool   | `false` | Publish the `XiImageInfo` topic with per-frame xiAPI metadata. |

@@ -9,7 +9,7 @@ Built as a `rclcpp_components` node, it combines features from the [`wavelab/xim
 
 - Full xiAPI Control: Configure format, ROI, triggers, exposure, white balance, and framerate.
 - Multi-Camera Ready: Opens via serial number; automatically divides USB bandwidth across cameras on the same bus.
-- **Hardware-timestamp anchoring** *(opt-in via `use_hardware_timestamps`)*: stamps reflect the moment of exposure start, anchored to ROS time on the first frame. Gives accurate sensor-to-message latency for downstream fusion. Note that this makes `ros2 topic delay` report negative values by design — see [Timestamps](#timestamps).
+- **Hardware-timestamp anchoring** *(opt-in via `use_hardware_timestamps`)*: stamps derived from the camera's hardware clock with periodic re-anchoring to bound drift. Gives microsecond-precise inter-frame intervals immune to host-side scheduling jitter — see [Timestamps](#timestamps).
 - Auto-Reconnect: Automatically recovers if the USB connection drops.
 - Publishes through `image_transport::CameraPublisher` so compressed transports (`compressed`, `theora`, etc.) work transparently.
 
@@ -109,7 +109,7 @@ All topics are published under the node's namespace.
   - `num_cams_in_bus` — divides available bandwidth by this number.
   - `bw_safety_ratio` — safety margin (default `0.9`).
   - `transport_buffer_commit` — in-flight USB requests (default `32`).
-- **Metadata**: `use_hardware_timestamps`, `publish_xi_image_info`
+- **Metadata**: `use_hardware_timestamps`, `hw_anchor_resync_period_s`, `publish_xi_image_info`
 
 For additional details check [`docs/parameters.md`](https://github.com/akhilj95/ximea_ros2_cam/tree/main/docs/parameters.md)
 
@@ -132,17 +132,24 @@ For additional details check [`docs/parameters.md`](https://github.com/akhilj95/
 
 ## Timestamps
 
-By default `use_hardware_timestamps: false` and image headers carry `node->now()` at message-construction time — clean to interpret, but the stamp lags the actual capture by exposure time + USB transfer + processing.
+The driver supports two timestamp modes via `use_hardware_timestamps`:
 
-With `use_hardware_timestamps: true`, the camera's own clock is anchored to ROS time on the first frame and every subsequent stamp reflects **exposure start**. This is what you want for multi-sensor fusion: downstream nodes see when photons actually hit the sensor, not when ROS happened to deliver the message.
+**`use_hardware_timestamps: false` (default)** — image headers carry `node->now()` at message-construction time. Clean to interpret. The stamp marks the moment the driver received the image, after exposure, USB transfer, and processing.
 
-A side effect: `ros2 topic delay` will report **negative values** (typically tens of milliseconds). That is correct — the stamped moment really is in the past by the time the message arrives. The magnitude is your true sensor-to-message latency. A stable negative delay with low standard deviation means the anchor is working; drift over long runs would indicate camera/host clock skew.
+**`use_hardware_timestamps: true`** — stamps are derived from the camera's hardware clock, anchored to ROS time. Inter-frame intervals are microsecond-precise and immune to host-side scheduling jitter (useful for high-rate timing analysis or sensor fusion where the *relative* timing between frames matters).
+
+What hardware timestamps do **not** give you: a true "absolute exposure start in wallclock time". The anchor is set when the driver's callback runs (i.e. after delivery), so the delivery latency of the anchor frame is baked into every subsequent stamp. The mode preserves frame-to-frame precision, not absolute pipeline latency.
+
+### Re-anchoring
+
+Camera and host crystals tick at slightly different rates (typically ~10 ppm). Left alone, the anchor would drift indefinitely. The driver re-anchors every `hw_anchor_resync_period_s` seconds (default `60`) to keep drift bounded. Set to `0` to disable re-anchoring — fine for short runs or hardware-triggered setups where absolute drift doesn't matter.
+
 
 ## Troubleshooting
 
 - **`ERROR: 11` (xiSetParam framerate)** — `XI_OUT_OF_RANGE`. Your requested framerate exceeds the bandwidth/exposure budget. Lower the framerate, reduce ROI, or switch to `XI_RAW8`.
 - **`ERROR: 100` (limit_bandwidth_mode)** — harmless. Some models (e.g. MQ013) don't support the mode toggle, but the bandwidth limit itself still applies.
-- **Negative `ros2 topic delay`** — expected with `use_hardware_timestamps: true`. See [Timestamps](#timestamps).
+- **Negative delay during startup or with `hw_anchor_resync_period_s: 0`** — first-frame warmup gets baked into the single anchor. Enable re-anchoring (default `60.0`) or wait one re-anchor period.
 - **"Unable to open camera calibration file"** — normal if uncalibrated. Run the standard ROS 2 camera calibrator to generate the file.
 - **"Device already opened" on startup** — normal during multi-camera polling. Resolves itself once the other node claims its specific camera.
 

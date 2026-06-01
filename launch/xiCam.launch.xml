@@ -1,6 +1,9 @@
 <launch shutdown_timeout="5.0">
     <group>
         <node pkg="ximea_ros2_cam" exec="ximea_ros2_cam_node" name="ximea_nir_node" namespace="ximea_nir" output="screen">
+            <param from="$(find-pkg-share ximea_ros2_cam)/config/nir_config.yaml" />
+
+            <!-- per-deployment overrides -->
             <param name="serial_no" value="'41102142'" />
             <param name="camera_name" value="ximea_nir" />
             <param name="camera_info_url" value="" />
@@ -13,13 +16,15 @@
             <param name="bw_safety_ratio" value="0.9" /> 
             <param name="publish_xi_image_info" value="true" />
             <param name="use_hardware_timestamps" value="true" />
-            
-            <param from="$(find-pkg-share ximea_ros2_cam)/config/nir_config.yaml" />
+            <param name="hw_anchor_resync_period_s" value="60.0" />
         </node>
     </group>
 
     <group>
         <node pkg="ximea_ros2_cam" exec="ximea_ros2_cam_node" name="ximea_rgb_node" namespace="ximea_rgb" output="screen">
+            <param from="$(find-pkg-share ximea_ros2_cam)/config/rgb_config.yaml" />
+
+            <!-- per-deployment overrides -->
             <param name="serial_no" value="'14206951'" />
             <param name="camera_name" value="ximea_rgb" />
             <param name="camera_info_url" value="" />
@@ -32,8 +37,7 @@
             <param name="bw_safety_ratio" value="0.9" /> 
             <param name="publish_xi_image_info" value="true" />
             <param name="use_hardware_timestamps" value="true" />
-
-            <param from="$(find-pkg-share ximea_ros2_cam)/config/rgb_config.yaml" />
+            <param name="hw_anchor_resync_period_s" value="60.0" />
         </node>
     </group>
 </launch>

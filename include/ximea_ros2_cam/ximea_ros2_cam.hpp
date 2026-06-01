@@ -54,9 +54,13 @@ private:
   std::atomic<bool> reconnect_pending_{false};
 
   // Hardware time anchoring state
-  bool hw_anchor_set_{false};
+  std::atomic<bool> hw_anchor_set_{false};
   rclcpp::Time hw_anchor_ros_time_{0, 0, RCL_ROS_TIME};
   uint64_t hw_anchor_us_{0};
+
+  // Re-anchor timer (only created when use_hardware_timestamps_ && period > 0)
+  rclcpp::TimerBase::SharedPtr reanchor_timer_;
+  double hw_anchor_resync_period_s_{0.0};
 
   std::string camera_name_, serial_no_, frame_id_, format_, encoding_;
   int format_int_{0};

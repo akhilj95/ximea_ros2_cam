@@ -16,7 +16,7 @@
 
     # -------- Exposure Settings --------
     auto_exposure: true                    # Turn this ON
-    exposure_time_us: 10000               # (this becomes max limit when auto_exposure is on)
+    exposure_time_us: 10000                # used only when auto_exposure: false
     manual_gain_db: 0.0                    # (ignored when auto_exposure is on)
     auto_exposure_priority: 0.8
     auto_exposure_time_limit_us: 20000     # Max 20 ms = safe for 30 fps minimum
@@ -30,3 +30,4 @@
     roi_top: 0
     roi_width: 0
     roi_height: 0
+

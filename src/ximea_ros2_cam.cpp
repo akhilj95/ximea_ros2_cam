@@ -105,6 +105,7 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
 
   // toggles
   use_hardware_timestamps_ = this->declare_parameter("use_hardware_timestamps", false);
+  hw_anchor_resync_period_s_ = this->declare_parameter("hw_anchor_resync_period_s", 60.0);
   publish_xi_image_info_   = this->declare_parameter("publish_xi_image_info", false);
 
   auto & fmt_map = imageFormatMap();
@@ -134,6 +135,20 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   open_device_timer_ = this->create_wall_timer(
     std::chrono::duration<double>(poll_open_period_s_),
     std::bind(&XimeaRosCam::openDeviceCallback, this));
+
+  if (use_hardware_timestamps_ && hw_anchor_resync_period_s_ > 0.0) {
+    reanchor_timer_ = this->create_wall_timer(
+      std::chrono::duration<double>(hw_anchor_resync_period_s_),
+      [this]() {
+        hw_anchor_set_ = false;
+        RCLCPP_DEBUG(this->get_logger(),
+                    "HW timestamp anchor reset (period %.1f s)",
+                    hw_anchor_resync_period_s_);
+      });
+    RCLCPP_INFO(this->get_logger(),
+                "HW timestamp re-anchoring enabled, period=%.1f s",
+                hw_anchor_resync_period_s_);
+  }
     
   RCLCPP_INFO(this->get_logger(), "Driver initialized. Polling for XIMEA camera Serial=%s", serial_no_.c_str());
 }
@@ -153,6 +168,10 @@ void XimeaRosCam::shutdown() {
   if (frame_capture_timer_) {
     frame_capture_timer_->cancel();
     frame_capture_timer_.reset();
+  }
+  if (reanchor_timer_) {
+    reanchor_timer_->cancel();
+    reanchor_timer_.reset();
   }
 
   std::lock_guard<std::mutex> lock(camera_mutex_);
@@ -176,8 +195,6 @@ void XimeaRosCam::openDeviceCallback() {
   }
 
   if (stat == XI_OK && xi_handle_) {
-    open_device_timer_->cancel();
-    
     if (!configureCamera()) {
       RCLCPP_ERROR(this->get_logger(), "Failed to configure camera parameters. Aborting.");
       xiCloseDevice(xi_handle_);
@@ -192,8 +209,10 @@ void XimeaRosCam::openDeviceCallback() {
       xi_handle_ = nullptr;
       return;
     }
+
     is_active_ = true;
     fail_count_ = 0;
+    open_device_timer_->cancel();
 
     if (frame_capture_timer_) {
       frame_capture_timer_->cancel();
@@ -387,6 +406,17 @@ rclcpp::Time XimeaRosCam::hardwareToRosTime(uint32_t ts_sec, uint32_t ts_usec) {
 }
 
 void XimeaRosCam::frameCaptureCallback() {
+  // Safe reconnect delegation (outside lock, avoids destroying self timer synchronously)
+  if (reconnect_pending_.exchange(false)) {
+    if (frame_capture_timer_) {
+      frame_capture_timer_->cancel();
+    }
+    open_device_timer_ = this->create_wall_timer(
+      std::chrono::duration<double>(poll_open_period_s_),
+      std::bind(&XimeaRosCam::openDeviceCallback, this));
+    return;
+  }
+
   if (!is_active_) return;
 
   XI_IMG xi_img;
@@ -411,17 +441,6 @@ void XimeaRosCam::frameCaptureCallback() {
       return;
     }
     fail_count_ = 0;
-  }
-
-  // Safe reconnect delegation (outside lock, avoids destroying self timer synchronously)
-  if (reconnect_pending_.exchange(false)) {
-    if (frame_capture_timer_) {
-      frame_capture_timer_->cancel();
-    }
-    open_device_timer_ = this->create_wall_timer(
-      std::chrono::duration<double>(poll_open_period_s_),
-      std::bind(&XimeaRosCam::openDeviceCallback, this));
-    return;
   }
 
   rclcpp::Time stamp = use_hardware_timestamps_ ? 
