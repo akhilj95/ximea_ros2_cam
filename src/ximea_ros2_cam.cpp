@@ -121,6 +121,18 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   encoding_        = enc_map.at(format_);
   bytes_per_pixel_ = bpp_map.at(format_);
 
+  // Disable image_transport plugins we don't publish through (compressedDepth,
+  // theora). Effective on Jazzy and newer (image_common PR #264). On Humble
+  // the parameter is declared but not yet honored by image_transport —
+  // filter with `ros2 bag record --regex --exclude '.*/(compressedDepth|theora)$'`
+  // as a workaround there.
+  this->declare_parameter<std::vector<std::string>>(
+    "image_raw.disable_pub_plugins",
+    std::vector<std::string>{
+      "image_transport/compressedDepth",
+      "image_transport/theora"
+    });
+
   auto qos = rmw_qos_profile_sensor_data;
   image_pub_ = image_transport::create_camera_publisher(this, "image_raw", qos);
   

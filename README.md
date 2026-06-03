@@ -11,7 +11,7 @@ Built as a `rclcpp_components` node, it combines features from the [`wavelab/xim
 - Multi-Camera Ready: Opens via serial number; automatically divides USB bandwidth across cameras on the same bus.
 - **Hardware-timestamp anchoring** *(opt-in via `use_hardware_timestamps`)*: stamps derived from the camera's hardware clock with periodic re-anchoring to bound drift. Gives microsecond-precise inter-frame intervals immune to host-side scheduling jitter — see [Timestamps](#timestamps).
 - Auto-Reconnect: Automatically recovers if the USB connection drops.
-- Publishes through `image_transport::CameraPublisher` so compressed transports (`compressed`, `theora`, etc.) work transparently.
+* Flexible image transport via `image_transport`: supports raw, JPEG, and PNG formats.
 
 ---
 
