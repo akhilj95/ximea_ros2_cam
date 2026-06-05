@@ -1,4 +1,4 @@
-# ximea_ros2_cam
+# ximea_ros2_cam (ROS 2 XIMEA Camera Driver)
 
 A ROS 2 driver for [XIMEA](https://www.ximea.com/) cameras (USB3 MQ/MC/MX series).
 Built as a `rclcpp_components` node, it combines features from the [`wavelab/ximea_ros_cam`](https://github.com/wavelab/ximea_ros_cam) ROS 1 driver, with additional ideas borrowed from the [`African-Robotics-Unit/ximea_ROS2_driver`](https://github.com/African-Robotics-Unit/ximea_ROS2_driver) port.
