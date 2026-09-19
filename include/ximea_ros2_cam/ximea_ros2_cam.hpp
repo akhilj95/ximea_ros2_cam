@@ -92,6 +92,8 @@ private:
   double bw_safety_ratio_{0.9};
   int transport_buffer_commit_{32};
   bool recent_frame_{true};
+  int warmup_frames_{10};
+  int warmup_count_{0};
   std::string camera_info_url_;
 };
 

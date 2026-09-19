@@ -98,6 +98,7 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   bw_safety_ratio_         = this->declare_parameter("bw_safety_ratio", 0.9);
   transport_buffer_commit_ = this->declare_parameter("transport_buffer_commit", 32);
   recent_frame_            = this->declare_parameter("recent_frame", true);
+  warmup_frames_           = this->declare_parameter("warmup_frames", 10);
 
   if (bw_safety_ratio_ <= 0.0 || bw_safety_ratio_ > 1.0) {
     RCLCPP_WARN(get_logger(), "bw_safety_ratio=%.3f out of bounds; clamping to 0.9", bw_safety_ratio_);
@@ -173,6 +174,7 @@ XimeaRosCam::~XimeaRosCam() {
 void XimeaRosCam::shutdown() {
   is_active_ = false;
   hw_anchor_set_ = false;
+  warmup_count_ = 0;
 
   if (open_device_timer_) {
     open_device_timer_->cancel();
@@ -225,6 +227,7 @@ void XimeaRosCam::openDeviceCallback() {
 
     is_active_ = true;
     fail_count_ = 0;
+    warmup_count_ = 0;
     open_device_timer_->cancel();
 
     if (frame_capture_timer_) {
@@ -463,6 +466,15 @@ void XimeaRosCam::frameCaptureCallback() {
       return;
     }
     fail_count_ = 0;
+  }
+
+  // Discard warmup frames after startup/reconnect to let USB and auto-exposure settle,
+  // preventing initial latency from biasing the hardware timestamp anchor.
+  if (warmup_count_ < warmup_frames_) {
+    if (++warmup_count_ == warmup_frames_) {
+      RCLCPP_INFO(this->get_logger(), "Warmup complete (%d frames discarded). Streaming images.", warmup_frames_);
+    }
+    return;
   }
 
   rclcpp::Time stamp = use_hardware_timestamps_ ? 

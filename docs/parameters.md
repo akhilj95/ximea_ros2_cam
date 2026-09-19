@@ -76,6 +76,7 @@ Values are snapped down to the nearest valid increment for the sensor.
 | `bw_safety_ratio`          | double | `0.9`   | Safety factor applied to allocated bandwidth (0 < r ≤ 1). Clamped if out of range. |
 | `transport_buffer_commit`  | int    | `32`    | `XI_PRM_ACQ_TRANSPORT_BUFFER_COMMIT` — number of in-flight USB requests. 32 is XIMEA's recommended value for Linux USB3. |
 | `recent_frame`             | bool   | `true`  | Discards old queue frames and returns only the freshest image via `XI_PRM_RECENT_FRAME`. |
+| `warmup_frames`            | int    | `10`    | Number of initial frames to discard during startup/reconnect before publishing and anchoring. |
 
 ### Timestamps and metadata
 
