@@ -10,13 +10,16 @@
             <param name="frame_id" value="nir_link" />
             
             <param name="poll_open_period_s" value="2.0" />
-            <param name="poll_frame_period_s" value="0.001" />
+            <param name="poll_frame_period_s" value="0.01" />
             
             <param name="num_cams_in_bus" value="2" />
             <param name="bw_safety_ratio" value="0.9" /> 
             <param name="publish_xi_image_info" value="true" />
             <param name="use_hardware_timestamps" value="true" />
             <param name="hw_anchor_resync_period_s" value="60.0" />
+                        
+            <param name="recent_frame" value="true" />
+            <param name="warmup_frames" value="10" />
         </node>
     </group>
 
@@ -31,13 +34,16 @@
             <param name="frame_id" value="rgb_link" />
             
             <param name="poll_open_period_s" value="3.0" />
-            <param name="poll_frame_period_s" value="0.001" />
+            <param name="poll_frame_period_s" value="0.01" />
             
             <param name="num_cams_in_bus" value="2" />
             <param name="bw_safety_ratio" value="0.9" /> 
             <param name="publish_xi_image_info" value="true" />
             <param name="use_hardware_timestamps" value="true" />
             <param name="hw_anchor_resync_period_s" value="60.0" />
+            
+            <param name="recent_frame" value="true" />
+            <param name="warmup_frames" value="10" />
         </node>
     </group>
 </launch>
