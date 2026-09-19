@@ -97,6 +97,7 @@ XimeaRosCam::XimeaRosCam(const rclcpp::NodeOptions & options)
   num_cams_in_bus_         = this->declare_parameter("num_cams_in_bus", 1);
   bw_safety_ratio_         = this->declare_parameter("bw_safety_ratio", 0.9);
   transport_buffer_commit_ = this->declare_parameter("transport_buffer_commit", 32);
+  recent_frame_            = this->declare_parameter("recent_frame", true);
 
   if (bw_safety_ratio_ <= 0.0 || bw_safety_ratio_ > 1.0) {
     RCLCPP_WARN(get_logger(), "bw_safety_ratio=%.3f out of bounds; clamping to 0.9", bw_safety_ratio_);
@@ -378,6 +379,15 @@ bool XimeaRosCam::configureCamera() {
   s = xiSetParamInt(xi_handle_, XI_PRM_ACQ_TRANSPORT_BUFFER_COMMIT, transport_buffer_commit_);
   if (s != XI_OK) {
     RCLCPP_WARN(log, "Could not set transport buffer commit to %d (status %d)", transport_buffer_commit_, s);
+  }
+
+  if (recent_frame_) {
+    s = xiSetParamInt(xi_handle_, XI_PRM_RECENT_FRAME, 1);
+    if (s != XI_OK) {
+      RCLCPP_WARN(log, "Could not enable XI_PRM_RECENT_FRAME (status %d)", s);
+    } else {
+      RCLCPP_INFO(log, "XI_PRM_RECENT_FRAME enabled for lower latency.");
+    }
   }
 
   // Optimize transport buffer size for small payloads (latency reduction)

@@ -91,6 +91,7 @@ private:
   int    num_cams_in_bus_{1};
   double bw_safety_ratio_{0.9};
   int transport_buffer_commit_{32};
+  bool recent_frame_{true};
   std::string camera_info_url_;
 };
 

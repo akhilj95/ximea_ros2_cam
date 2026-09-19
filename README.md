@@ -109,6 +109,7 @@ All topics are published under the node's namespace.
   - `num_cams_in_bus` — divides available bandwidth by this number.
   - `bw_safety_ratio` — safety margin (default `0.9`).
   - `transport_buffer_commit` — in-flight USB requests (default `32`).
+  - `recent_frame` — bypasses queueing delays by always fetching the freshest image (default `true`).
 - **Metadata**: `use_hardware_timestamps`, `hw_anchor_resync_period_s`, `publish_xi_image_info`
 
 For additional details check [`docs/parameters.md`](https://github.com/akhilj95/ximea_ros2_cam/tree/main/docs/parameters.md)

@@ -75,6 +75,7 @@ Values are snapped down to the nearest valid increment for the sensor.
 | `num_cams_in_bus`          | int    | `1`     | Number of cameras sharing the same USB controller. Available bandwidth is divided by this. |
 | `bw_safety_ratio`          | double | `0.9`   | Safety factor applied to allocated bandwidth (0 < r ≤ 1). Clamped if out of range. |
 | `transport_buffer_commit`  | int    | `32`    | `XI_PRM_ACQ_TRANSPORT_BUFFER_COMMIT` — number of in-flight USB requests. 32 is XIMEA's recommended value for Linux USB3. |
+| `recent_frame`             | bool   | `true`  | Discards old queue frames and returns only the freshest image via `XI_PRM_RECENT_FRAME`. |
 
 ### Timestamps and metadata
 
